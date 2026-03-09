@@ -87,6 +87,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 
 	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		m.viewport, cmd = m.viewport.Update(msg)
 	// tea.WindowSizeMsg przychodzi na starcie i przy każdej zmianie rozmiaru okna terminala
 	case tea.WindowSizeMsg:
 		headerHeight := 3
@@ -168,8 +170,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 	}
 
-	// Obsługa pozostałych zdarzeń (np. scroll myszy) przez viewport
-	m.viewport, cmd = m.viewport.Update(msg)
 	cmds = append(cmds, cmd)
 
 	return m, tea.Batch(cmds...)
