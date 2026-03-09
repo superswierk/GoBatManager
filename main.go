@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -56,21 +57,29 @@ type model struct {
 	running   bool           // Czy skrypt jest w trakcie wykonywania
 	focusLogs bool           // Czy sterowanie (strzałki) jest przekierowane na logi
 	ready     bool           // Czy otrzymaliśmy WindowSizeMsg i zainicjowaliśmy wymiary
+	extension string         // Wykryte rozszerzenie (.bat lub .sh)
 }
 
 // Funkcja inicjalizująca model startowy
 func initialModel() model {
+
+	ext := ".sh"
+	if runtime.GOOS == "windows" {
+		ext = ".bat"
+	}
+
 	files, _ := os.ReadDir(".")
-	var batFiles []string
+	var scripts []string
 	for _, f := range files {
 		// Szukamy tylko plików z rozszerzeniem .bat
-		if !f.IsDir() && strings.HasSuffix(strings.ToLower(f.Name()), ".bat") {
-			batFiles = append(batFiles, f.Name())
+		if !f.IsDir() && strings.HasSuffix(strings.ToLower(f.Name()), ext) {
+			scripts = append(scripts, f.Name())
 		}
 	}
 
 	return model{
-		choices: batFiles,
+		choices:   scripts,
+		extension: ext,
 	}
 }
 
@@ -146,7 +155,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logLines = []string{"[SYSTEM] Uruchamianie: " + m.choices[m.cursor] + "..."}
 				m.viewport.SetContent(strings.Join(m.logLines, "\n"))
 				target := m.choices[m.cursor]
-				return m, m.runBatScript(target)
+				return m, m.runScript(target)
 			}
 		}
 
@@ -176,9 +185,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // Funkcja pomocnicza do asynchronicznego uruchamiania skryptu
-func (m model) runBatScript(filename string) tea.Cmd {
+func (m model) runScript(filename string) tea.Cmd {
 	return func() tea.Msg {
-		logFilename := strings.TrimSuffix(filename, ".bat") + ".log"
+		logFilename := strings.TrimSuffix(filename, m.extension) + ".log"
 
 		// 1. Przygotowanie pliku logu
 		logFile, err := os.Create(logFilename)
@@ -187,8 +196,13 @@ func (m model) runBatScript(filename string) tea.Cmd {
 		}
 		defer logFile.Close()
 
-		// 2. Konfiguracja komendy (cmd /c wywołuje plik bat w Windows)
-		c := exec.Command("cmd", "/c", filename)
+		// 2. Dobór komendy w zależności od systemu operacyjnego
+		var c *exec.Cmd
+		if runtime.GOOS == "windows" {
+			c = exec.Command("cmd", "/c", filename)
+		} else {
+			c = exec.Command("sh", filename)
+		}
 
 		// Pobieramy pipe dla wyjścia standardowego i błędów
 		stdout, err := c.StdoutPipe()
@@ -234,11 +248,11 @@ func (m model) View() string {
 	}
 
 	var s strings.Builder
-	s.WriteString(headerStyle.Render(" BAT LAUNCHER GO ") + "\n")
+	s.WriteString(headerStyle.Render(fmt.Sprintf(" SCRIPT LAUNCHER (%s) ", strings.ToUpper(runtime.GOOS))) + "\n")
 
 	// Renderowanie listy plików
 	if len(m.choices) == 0 {
-		s.WriteString("  Brak plików .bat w tym folderze.\n")
+		s.WriteString(fmt.Sprintf("  Brak plików %s w tym folderze.\n", m.extension))
 	} else {
 		for i, choice := range m.choices {
 			cursor := "  "
