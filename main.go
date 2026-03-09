@@ -14,6 +14,7 @@ import (
 )
 
 // --- STYLE WIZUALNE (LIP GLOSS) ---
+// Definiujemy style raz, aby używać ich wielokrotnie w metodzie View()
 var (
 	headerStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -26,11 +27,13 @@ var (
 			Foreground(lipgloss.Color("#7D56F4")).
 			Bold(true)
 
+	// Standardowa ramka dla okna logów
 	viewportStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#555555")).
 			Padding(0, 1)
 
+	// Ramka zmieniająca kolor na fioletowy, gdy użytkownik przewija logi
 	activeViewportStyle = viewportStyle.Copy().
 				BorderForeground(lipgloss.Color("#7D56F4"))
 
@@ -39,24 +42,28 @@ var (
 )
 
 // --- TYPY WIADOMOŚCI (MESSAGES) ---
-type logLineMsg string
-type finishedMsg struct{ err error }
+// W Bubble Tea komunikacja odbywa się za pomocą struktur/typów przesyłanych do funkcji Update
+type logLineMsg string               // Przesyła linię tekstu ze skryptu do UI
+type finishedMsg struct{ err error } // Informuje o zakończeniu procesu
 
 // --- MODEL APLIKACJI ---
+// Główna struktura przechowująca stan całej aplikacji
 type model struct {
-	choices   []string
-	cursor    int
-	viewport  viewport.Model
-	logLines  []string
-	running   bool
-	focusLogs bool
-	ready     bool
+	choices   []string       // Lista znalezionych plików .bat
+	cursor    int            // Indeks aktualnie podświetlonego pliku
+	viewport  viewport.Model // Komponent Bubbles do obsługi przewijanego tekstu
+	logLines  []string       // Bufor przechowujący wszystkie linie logów
+	running   bool           // Czy skrypt jest w trakcie wykonywania
+	focusLogs bool           // Czy sterowanie (strzałki) jest przekierowane na logi
+	ready     bool           // Czy otrzymaliśmy WindowSizeMsg i zainicjowaliśmy wymiary
 }
 
+// Funkcja inicjalizująca model startowy
 func initialModel() model {
 	files, _ := os.ReadDir(".")
 	var batFiles []string
 	for _, f := range files {
+		// Szukamy tylko plików z rozszerzeniem .bat
 		if !f.IsDir() && strings.HasSuffix(strings.ToLower(f.Name()), ".bat") {
 			batFiles = append(batFiles, f.Name())
 		}
@@ -67,10 +74,12 @@ func initialModel() model {
 	}
 }
 
+// Init wywoływane na starcie aplikacji (można tu zwrócić Cmd na start)
 func (m model) Init() tea.Cmd {
 	return nil
 }
 
+// Update - serce aplikacji, reaguje na zdarzenia (klawisze, wiadomości systemowe)
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		cmd  tea.Cmd
@@ -78,12 +87,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 
 	switch msg := msg.(type) {
+	// tea.WindowSizeMsg przychodzi na starcie i przy każdej zmianie rozmiaru okna terminala
 	case tea.WindowSizeMsg:
 		headerHeight := 3
 		listHeight := len(m.choices) + 2
 		footerHeight := 3
 		reservedHeight := headerHeight + listHeight + footerHeight
 
+		// Inicjalizacja lub aktualizacja wymiarów viewportu
 		if !m.ready {
 			m.viewport = viewport.New(msg.Width-4, msg.Height-reservedHeight)
 			m.viewport.SetContent("Wybierz skrypt i naciśnij ENTER...")
@@ -99,6 +110,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "q", "esc":
+			// Jeśli przeglądamy logi, 'q' wraca do menu. Jeśli nie - zamyka program.
 			if m.focusLogs {
 				m.focusLogs = false
 				return m, nil
@@ -107,6 +119,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "up", "k":
 			if m.focusLogs {
+				// Przekazujemy klawisz do komponentu viewport, aby przewinął tekst
 				m.viewport, cmd = m.viewport.Update(msg)
 				return m, cmd
 			}
@@ -124,6 +137,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "enter":
+			// Blokada przed wielokrotnym uruchomieniem
 			if !m.running && len(m.choices) > 0 {
 				m.running = true
 				m.focusLogs = false
@@ -134,14 +148,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	// Nowa linia tekstu przyszła z goroutine (procesu tła)
 	case logLineMsg:
 		m.logLines = append(m.logLines, string(msg))
 		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
-		m.viewport.GotoBottom()
+		m.viewport.GotoBottom() // Automatyczne przewijanie przy nowych logach
 
+	// Proces .bat zakończył się
 	case finishedMsg:
 		m.running = false
-		m.focusLogs = true
+		m.focusLogs = true // Aktywujemy tryb przeglądania logów po zakończeniu
 		status := "SUKCES"
 		if msg.err != nil {
 			status = fmt.Sprintf("BŁĄD (%v)", msg.err)
@@ -152,25 +168,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 	}
 
+	// Obsługa pozostałych zdarzeń (np. scroll myszy) przez viewport
 	m.viewport, cmd = m.viewport.Update(msg)
 	cmds = append(cmds, cmd)
 
 	return m, tea.Batch(cmds...)
 }
 
+// Funkcja pomocnicza do asynchronicznego uruchamiania skryptu
 func (m model) runBatScript(filename string) tea.Cmd {
 	return func() tea.Msg {
 		logFilename := strings.TrimSuffix(filename, ".bat") + ".log"
 
-		// Sprawdzanie błędu przy tworzeniu pliku
+		// 1. Przygotowanie pliku logu
 		logFile, err := os.Create(logFilename)
 		if err != nil {
 			return finishedMsg{err: fmt.Errorf("błąd zapisu pliku .log: %w", err)}
 		}
 		defer logFile.Close()
 
+		// 2. Konfiguracja komendy (cmd /c wywołuje plik bat w Windows)
 		c := exec.Command("cmd", "/c", filename)
 
+		// Pobieramy pipe dla wyjścia standardowego i błędów
 		stdout, err := c.StdoutPipe()
 		if err != nil {
 			return finishedMsg{err: fmt.Errorf("błąd stdout: %w", err)}
@@ -181,29 +201,33 @@ func (m model) runBatScript(filename string) tea.Cmd {
 			return finishedMsg{err: fmt.Errorf("błąd stderr: %w", err)}
 		}
 
+		// Łączymy oba strumienie, aby czytać błędy i sukcesy jednocześnie
 		scriptOutput := io.MultiReader(stdout, stderr)
 
-		// Sprawdzanie błędu przy starcie procesu
+		// 3. Start procesu
 		if err := c.Start(); err != nil {
 			return finishedMsg{err: fmt.Errorf("nie udało się uruchomić skryptu: %w", err)}
 		}
 
+		// TeeReader: kopiuje wszystko co przeczyta ze skryptu bezpośrednio do pliku .log
 		teeReader := io.TeeReader(scriptOutput, logFile)
 		scanner := bufio.NewScanner(teeReader)
 		for scanner.Scan() {
+			// Pętla wysyła linie tekstu do głównej pętli programu Bubble Tea
 			p.Send(logLineMsg(scanner.Text()))
 		}
 
-		// Sprawdzanie błędów skanera (np. zbyt długa linia)
 		if err := scanner.Err(); err != nil {
 			p.Send(logLineMsg(fmt.Sprintf("[SYSTEM BŁĄD] Problem z odczytem wyjścia: %v", err)))
 		}
 
+		// 4. Czekamy na fizyczne zakończenie procesu
 		err = c.Wait()
 		return finishedMsg{err: err}
 	}
 }
 
+// View odpowiada za renderowanie tekstu na ekranie (czysty string)
 func (m model) View() string {
 	if !m.ready {
 		return "\n  Inicjalizacja interfejsu..."
@@ -212,6 +236,7 @@ func (m model) View() string {
 	var s strings.Builder
 	s.WriteString(headerStyle.Render(" BAT LAUNCHER GO ") + "\n")
 
+	// Renderowanie listy plików
 	if len(m.choices) == 0 {
 		s.WriteString("  Brak plików .bat w tym folderze.\n")
 	} else {
@@ -223,6 +248,7 @@ func (m model) View() string {
 				if !m.focusLogs {
 					line = selectedStyle.Render(choice)
 				} else {
+					// Gdy przeglądamy logi, lista plików jest wyszarzona
 					line = lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaaaa")).Render(choice)
 				}
 			}
@@ -230,6 +256,7 @@ func (m model) View() string {
 		}
 	}
 
+	// Styl panelu logów
 	vStyle := viewportStyle
 	logHeader := " LOGI TERMINALA (AUTO-ZAPIS DO .LOG) "
 	if m.focusLogs {
@@ -240,6 +267,7 @@ func (m model) View() string {
 	s.WriteString("\n" + headerStyle.Copy().Background(lipgloss.Color("#333333")).Render(logHeader) + "\n")
 	s.WriteString(vStyle.Render(m.viewport.View()) + "\n")
 
+	// Dynamiczna pomoc na dole ekranu
 	help := " q: wyjdź • enter: uruchom • ↑/↓: nawigacja • myszka: scroll"
 	if m.focusLogs {
 		help = " q: powrót do listy • ↑/↓: przewijanie logów"
@@ -249,10 +277,14 @@ func (m model) View() string {
 	return s.String()
 }
 
+// Globalna zmienna p pozwala asynchronicznym funkcjom (goroutines) wysyłać dane do UI
 var p *tea.Program
 
 func main() {
 	m := initialModel()
+
+	// WithAltScreen: aplikacja działa w osobnym buforze (jak Vim/Nano)
+	// WithMouseCellMotion: umożliwia przewijanie logów kółkiem myszy
 	p = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	if _, err := p.Run(); err != nil {
