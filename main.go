@@ -49,7 +49,8 @@ type model struct {
 	viewport  viewport.Model
 	logLines  []string
 	running   bool
-	focusLogs bool // Czy strzałki obsługują teraz przewijanie logów
+	focusLogs bool
+	ready     bool
 }
 
 func initialModel() model {
@@ -61,12 +62,8 @@ func initialModel() model {
 		}
 	}
 
-	vp := viewport.New(80, 15)
-	vp.SetContent("Wybierz skrypt i naciśnij ENTER, aby rozpocząć...")
-
 	return model{
-		choices:  batFiles,
-		viewport: vp,
+		choices: batFiles,
 	}
 }
 
@@ -81,6 +78,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		headerHeight := 3
+		listHeight := len(m.choices) + 2
+		footerHeight := 3
+		reservedHeight := headerHeight + listHeight + footerHeight
+
+		if !m.ready {
+			m.viewport = viewport.New(msg.Width-4, msg.Height-reservedHeight)
+			m.viewport.SetContent("Wybierz skrypt i naciśnij ENTER...")
+			m.ready = true
+		} else {
+			m.viewport.Width = msg.Width - 4
+			m.viewport.Height = msg.Height - reservedHeight
+		}
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
@@ -88,14 +100,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "q", "esc":
 			if m.focusLogs {
-				m.focusLogs = false // Wyłączamy tryb przeglądania logów
+				m.focusLogs = false
 				return m, nil
 			}
-			return m, tea.Quit // Jeśli nie jesteśmy w logach, zamykamy apkę
+			return m, tea.Quit
 
 		case "up", "k":
 			if m.focusLogs {
-				// Jeśli fokus na logi, pozwalamy viewportowi obsłużyć ruch
 				m.viewport, cmd = m.viewport.Update(msg)
 				return m, cmd
 			}
@@ -105,7 +116,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "down", "j":
 			if m.focusLogs {
-				// Jeśli fokus na logi, pozwalamy viewportowi obsłużyć ruch
 				m.viewport, cmd = m.viewport.Update(msg)
 				return m, cmd
 			}
@@ -116,10 +126,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if !m.running && len(m.choices) > 0 {
 				m.running = true
-				m.focusLogs = false // Na czas trwania skryptu nie mrozimy menu, ale logi same scrollują
+				m.focusLogs = false
 				m.logLines = []string{"[SYSTEM] Uruchamianie: " + m.choices[m.cursor] + "..."}
 				m.viewport.SetContent(strings.Join(m.logLines, "\n"))
-
 				target := m.choices[m.cursor]
 				return m, m.runBatScript(target)
 			}
@@ -132,7 +141,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case finishedMsg:
 		m.running = false
-		m.focusLogs = true // Po skończeniu automatycznie dajemy fokus na logi do przejrzenia
+		m.focusLogs = true
 		status := "SUKCES"
 		if msg.err != nil {
 			status = fmt.Sprintf("BŁĄD (%v)", msg.err)
@@ -143,7 +152,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 	}
 
-	// Obsługa scrolla myszy zawsze działa dla viewportu
 	m.viewport, cmd = m.viewport.Update(msg)
 	cmds = append(cmds, cmd)
 
@@ -153,26 +161,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) runBatScript(filename string) tea.Cmd {
 	return func() tea.Msg {
 		logFilename := strings.TrimSuffix(filename, ".bat") + ".log"
+
+		// Sprawdzanie błędu przy tworzeniu pliku
 		logFile, err := os.Create(logFilename)
 		if err != nil {
-			return finishedMsg{err: fmt.Errorf("nie można utworzyć pliku logu: %w", err)}
+			return finishedMsg{err: fmt.Errorf("błąd zapisu pliku .log: %w", err)}
 		}
 		defer logFile.Close()
 
 		c := exec.Command("cmd", "/c", filename)
-		stdout, _ := c.StdoutPipe()
-		stderr, _ := c.StderrPipe()
+
+		stdout, err := c.StdoutPipe()
+		if err != nil {
+			return finishedMsg{err: fmt.Errorf("błąd stdout: %w", err)}
+		}
+
+		stderr, err := c.StderrPipe()
+		if err != nil {
+			return finishedMsg{err: fmt.Errorf("błąd stderr: %w", err)}
+		}
+
 		scriptOutput := io.MultiReader(stdout, stderr)
 
+		// Sprawdzanie błędu przy starcie procesu
 		if err := c.Start(); err != nil {
-			return finishedMsg{err: err}
+			return finishedMsg{err: fmt.Errorf("nie udało się uruchomić skryptu: %w", err)}
 		}
 
 		teeReader := io.TeeReader(scriptOutput, logFile)
 		scanner := bufio.NewScanner(teeReader)
 		for scanner.Scan() {
-			line := scanner.Text()
-			p.Send(logLineMsg(line))
+			p.Send(logLineMsg(scanner.Text()))
+		}
+
+		// Sprawdzanie błędów skanera (np. zbyt długa linia)
+		if err := scanner.Err(); err != nil {
+			p.Send(logLineMsg(fmt.Sprintf("[SYSTEM BŁĄD] Problem z odczytem wyjścia: %v", err)))
 		}
 
 		err = c.Wait()
@@ -181,11 +205,13 @@ func (m model) runBatScript(filename string) tea.Cmd {
 }
 
 func (m model) View() string {
-	var s strings.Builder
+	if !m.ready {
+		return "\n  Inicjalizacja interfejsu..."
+	}
 
+	var s strings.Builder
 	s.WriteString(headerStyle.Render(" BAT LAUNCHER GO ") + "\n")
 
-	// Lista plików
 	if len(m.choices) == 0 {
 		s.WriteString("  Brak plików .bat w tym folderze.\n")
 	} else {
@@ -204,12 +230,11 @@ func (m model) View() string {
 		}
 	}
 
-	// Panel logów - zmienia kolor ramki gdy ma fokus
 	vStyle := viewportStyle
 	logHeader := " LOGI TERMINALA (AUTO-ZAPIS DO .LOG) "
 	if m.focusLogs {
 		vStyle = activeViewportStyle
-		logHeader = " TRYB PRZEGLĄDANIA LOGÓW (NACIŚNIJ Q ABY WRÓCIĆ) "
+		logHeader = " TRYB PRZEGLĄDANIA LOGÓW (Q = POWRÓT) "
 	}
 
 	s.WriteString("\n" + headerStyle.Copy().Background(lipgloss.Color("#333333")).Render(logHeader) + "\n")
@@ -217,7 +242,7 @@ func (m model) View() string {
 
 	help := " q: wyjdź • enter: uruchom • ↑/↓: nawigacja • myszka: scroll"
 	if m.focusLogs {
-		help = " q: powrót do listy plików • ↑/↓: przewijanie logów"
+		help = " q: powrót do listy • ↑/↓: przewijanie logów"
 	}
 	s.WriteString(helpStyle.Render(help))
 
@@ -231,7 +256,7 @@ func main() {
 	p = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	if _, err := p.Run(); err != nil {
-		fmt.Printf("Wystąpił krytyczny błąd: %v", err)
+		fmt.Printf("Wystąpił błąd: %v", err)
 		os.Exit(1)
 	}
 }
