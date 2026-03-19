@@ -77,6 +77,10 @@ var (
 	// Styl dla zapisanego czasu w liście skryptów
 	savedTimeStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#666666"))
+
+	// Styl dla okna podglądu skryptu
+	previewViewportStyle = viewportStyle.Copy().
+			BorderForeground(lipgloss.Color("#00BFFF"))
 )
 
 // --- TYPY WIADOMOŚCI (MESSAGES) ---
@@ -106,6 +110,7 @@ type model struct {
 	startTime   time.Time         // Czas rozpoczęcia skryptu
 	elapsed     time.Duration     // Aktualny czas trwania
 	scriptTimes map[string]string // Baza danych przechowująca ostatnie czasy działania (Nazwa -> Czas)
+	previewing  bool              // Czy włączony jest tryb podglądu skryptu
 }
 
 // Funkcja inicjalizująca model startowy i wykrywająca system.
@@ -192,12 +197,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "q", "esc":
+			// Jeśli przeglądamy podgląd, zamykamy go
+			if m.previewing {
+				m.previewing = false
+				if len(m.logLines) == 0 {
+					m.viewport.SetContent("Wybierz skrypt i naciśnij ENTER...")
+				} else {
+					m.viewport.SetContent(strings.Join(m.logLines, "\n"))
+					m.viewport.GotoBottom()
+				}
+				return m, nil
+			}
 			// Jeśli przeglądamy logi, 'q' wraca do menu. W przeciwnym razie zamyka aplikację.
 			if m.focusLogs {
 				m.focusLogs = false
 				return m, nil
 			}
 			return m, tea.Quit
+
+		case " ":
+			// Przełączanie trybu podglądu spacją
+			if !m.running && len(m.choices) > 0 {
+				m.previewing = !m.previewing
+				if m.previewing {
+					m = m.updatePreview()
+				} else {
+					if len(m.logLines) == 0 {
+						m.viewport.SetContent("Wybierz skrypt i naciśnij ENTER...")
+					} else {
+						m.viewport.SetContent(strings.Join(m.logLines, "\n"))
+						m.viewport.GotoBottom()
+					}
+				}
+			}
+			return m, nil
 
 		case "up", "k":
 			if m.focusLogs {
@@ -206,6 +239,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if !m.running && m.cursor > 0 {
 				m.cursor--
+				if m.previewing {
+					m = m.updatePreview()
+				}
 			}
 
 		case "down", "j":
@@ -215,6 +251,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if !m.running && m.cursor < len(m.choices)-1 {
 				m.cursor++
+				if m.previewing {
+					m = m.updatePreview()
+				}
 			}
 
 		case "enter":
@@ -222,6 +261,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.running && len(m.choices) > 0 {
 				m.running = true
 				m.focusLogs = false
+				m.previewing = false // Wyłączamy podgląd przy starcie
 				m.startTime = time.Now()
 				m.elapsed = 0
 				m.logLines = []string{"[SYSTEM] Uruchamianie: " + m.choices[m.cursor] + "..."}
@@ -263,6 +303,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+// Funkcja ładująca zawartość pliku do podglądu
+func (m model) updatePreview() model {
+	if len(m.choices) == 0 {
+		return m
+	}
+	filename := m.choices[m.cursor]
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		m.viewport.SetContent(fmt.Sprintf("Nie można odczytać pliku: %v", err))
+		return m
+	}
+	m.viewport.SetContent(string(content))
+	m.viewport.GotoTop()
+	return m
 }
 
 // runScript - asynchroniczne uruchomienie procesu, zapis do pliku i streaming do UI.
@@ -381,7 +437,11 @@ func (m model) View() string {
 		timeStr = timerStyle.Render(fmt.Sprintf(" [%s] ", m.elapsed.Round(time.Second)))
 	}
 
-	if m.focusLogs {
+	if m.previewing {
+		vStyle = previewViewportStyle
+		logHeader = fmt.Sprintf(" PODGLĄD: %s (SPACJA = ZAMKNIJ) ", m.choices[m.cursor])
+		timeStr = "" // W podglądzie ukrywamy stoper, aby zaoszczędzić miejsce
+	} else if m.focusLogs {
 		vStyle = activeViewportStyle
 		logHeader = " TRYB PRZEGLĄDANIA LOGÓW (Q = POWRÓT) "
 	}
@@ -406,8 +466,10 @@ func (m model) View() string {
 	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, leftBox, rightBox)
 
 	// 4. STOPKA (Dynamiczna pomoc)
-	help := " q: wyjdź • enter: uruchom • ↑/↓: nawigacja • myszka: scroll"
-	if m.focusLogs {
+	help := " q: wyjdź • spacja: podgląd • enter: uruchom • ↑/↓: nawigacja • myszka: scroll"
+	if m.previewing {
+		help = " spacja/q: zamknij podgląd • ↑/↓: nawigacja • myszka: przewijanie podglądu"
+	} else if m.focusLogs {
 		help = " q: powrót do listy • ↑/↓: przewijanie logów kółkiem myszy"
 	}
 	footer := helpStyle.Render(help)
