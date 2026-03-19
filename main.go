@@ -318,10 +318,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		status := "SUKCES"
 		if msg.err != nil {
 			status = fmt.Sprintf("BŁĄD (%v)", msg.err)
-			m.results[msg.name] = false // Błąd
-			m.queue = nil               // Przerwij kolejkę przy błędzie
+			m.results[msg.name] = false // Błąd w GUI
+			// USUNIĘTO: m.queue = nil -> Kolejka będzie kontynuowana mimo błędu
 		} else {
-			m.results[msg.name] = true // Sukces
+			m.results[msg.name] = true // Sukces w GUI
 		}
 		
 		m.logLines = append(m.logLines, fmt.Sprintf("\n[SYSTEM] Proces zakończony: %s", status))
@@ -329,14 +329,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
 		m.viewport.GotoBottom()
 
-		// Jeśli są kolejne skrypty w kolejce, uruchom następny
+		// Jeśli są kolejne skrypty w kolejce, uruchom następny (nawet jeśli poprzedni padł)
 		if len(m.queue) > 0 {
 			m.running = true
 			return m.runNextInQueue()
 		}
 
 		m.focusLogs = true // Po wszystkim aktywujemy tryb przeglądania logów
-		m.logLines = append(m.logLines, "[SYSTEM] Wszystkie zadania zakończone. Naciśnij 'q' aby wrócić.")
+		m.logLines = append(m.logLines, "[SYSTEM] Wszystkie zadania z kolejki zostały przetworzone. Naciśnij 'q' aby wrócić.")
 		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
 	}
 
