@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -44,12 +45,18 @@ var (
 
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#666666"))
+
+	// Styl dla licznika czasu
+	timerStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FFA500")).
+			Bold(true)
 )
 
 // --- TYPY WIADOMOŚCI (MESSAGES) ---
 // Bubble Tea używa typów do komunikacji między procesami tła a główną pętlą UI.
 type logLineMsg string               // Przesyła nową linię tekstu do wyświetlenia w UI
 type finishedMsg struct{ err error } // Informuje o zakończeniu działania skryptu
+type tickMsg time.Time              // Wiadomość do aktualizacji licznika czasu
 
 // --- MODEL APLIKACJI ---
 // Główna struktura przechowująca stan całej aplikacji.
@@ -64,6 +71,8 @@ type model struct {
 	extension string         // Wykryte rozszerzenie specyficzne dla systemu
 	width     int            // Zapamiętana szerokość okna terminala
 	height    int            // Zapamiętana wysokość okna terminala
+	startTime time.Time      // Czas rozpoczęcia skryptu
+	elapsed   time.Duration  // Aktualny czas trwania
 }
 
 // Funkcja inicjalizująca model startowy i wykrywająca system.
@@ -92,6 +101,13 @@ func (m model) Init() tea.Cmd {
 	return nil
 }
 
+// tick co sekundę do odświeżania stopera
+func tick() tea.Cmd {
+	return tea.Every(time.Second, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
 // Update - główna pętla obsługująca zdarzenia (klawisze, mysz, wiadomości systemowe).
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
@@ -104,6 +120,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		m.viewport, cmd = m.viewport.Update(msg)
 		cmds = append(cmds, cmd)
+
+	// Aktualizacja licznika czasu
+	case tickMsg:
+		if m.running {
+			m.elapsed = time.Since(m.startTime)
+			return m, tick()
+		}
 
 	// WindowSizeMsg przychodzi na starcie i przy każdej zmianie rozmiaru okna.
 	case tea.WindowSizeMsg:
@@ -165,10 +188,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.running && len(m.choices) > 0 {
 				m.running = true
 				m.focusLogs = false
+				m.startTime = time.Now()
+				m.elapsed = 0
 				m.logLines = []string{"[SYSTEM] Uruchamianie: " + m.choices[m.cursor] + "..."}
 				m.viewport.SetContent(strings.Join(m.logLines, "\n"))
 				target := m.choices[m.cursor]
-				return m, m.runScript(target)
+				return m, tea.Batch(m.runScript(target), tick())
 			}
 		}
 
@@ -182,11 +207,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case finishedMsg:
 		m.running = false
 		m.focusLogs = true // Aktywujemy tryb przeglądania logów (scroll) po zakończeniu.
+		m.elapsed = time.Since(m.startTime)
 		status := "SUKCES"
 		if msg.err != nil {
 			status = fmt.Sprintf("BŁĄD (%v)", msg.err)
 		}
 		m.logLines = append(m.logLines, fmt.Sprintf("\n[SYSTEM] Proces zakończony: %s", status))
+		m.logLines = append(m.logLines, fmt.Sprintf("[SYSTEM] Czas trwania: %s", m.elapsed.Round(time.Second)))
 		m.logLines = append(m.logLines, "[SYSTEM] Tryb przeglądania logów aktywny. Naciśnij 'q' aby wrócić do listy.")
 		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
 		m.viewport.GotoBottom()
@@ -297,21 +324,31 @@ func (m model) View() string {
 	// 3. PRAWY PANEL (Logi)
 	vStyle := viewportStyle
 	logHeader := " LOGI TERMINALA (AUTO-ZAPIS DO .LOG) "
+	
+	// Przygotowanie informacji o czasie pracy
+	timeStr := ""
+	if m.running || m.elapsed > 0 {
+		timeStr = timerStyle.Render(fmt.Sprintf(" [%s] ", m.elapsed.Round(time.Second)))
+	}
+
 	if m.focusLogs {
 		vStyle = activeViewportStyle
 		logHeader = " TRYB PRZEGLĄDANIA LOGÓW (Q = POWRÓT) "
 	}
 
-	// Tytuł dla prawego panelu.
+	// Tytuł dla prawego panelu z dołączonym licznikiem czasu.
 	rightTitle := lipgloss.NewStyle().
 		Background(lipgloss.Color("#333333")).
 		Foreground(lipgloss.Color("#FFFFFF")).
 		Padding(0, 1).
 		Render(logHeader)
+	
+	// Składamy nagłówek panelu logów (Tytuł + Czas)
+	logBar := lipgloss.JoinHorizontal(lipgloss.Center, rightTitle, timeStr)
 
 	// Składamy prawy panel: Tytuł nad ramką z tekstem (viewport).
 	rightBox := lipgloss.JoinVertical(lipgloss.Left,
-		rightTitle,
+		logBar,
 		vStyle.Render(m.viewport.View()),
 	)
 
