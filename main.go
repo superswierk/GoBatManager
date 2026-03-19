@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,28 @@ import (
 // Ta zmienna zostanie uzupełniona automatycznie przez GoReleaser podczas budowania taga.
 // W trybie deweloperskim (go run .) będzie wyświetlać "dev".
 var version = "dev"
+
+// Plik naszej bazy danych w formacie JSON
+const timesFile = "script_times.json"
+
+// --- FUNKCJE POMOCNICZE BAZY DANYCH (JSON) ---
+// Ładuje zapisane czasy z pliku JSON do mapy. Jeśli plik nie istnieje, zwraca pustą mapę.
+func loadTimes() map[string]string {
+	times := make(map[string]string)
+	data, err := os.ReadFile(timesFile)
+	if err == nil {
+		json.Unmarshal(data, &times)
+	}
+	return times
+}
+
+// Zapisuje mapę czasów do pliku JSON w ładnie sformatowany sposób (Indent).
+func saveTimes(times map[string]string) {
+	data, err := json.MarshalIndent(times, "", "  ")
+	if err == nil {
+		os.WriteFile(timesFile, data, 0644)
+	}
+}
 
 // --- STYLE WIZUALNE (LIP GLOSS) ---
 // Definiujemy style raz, aby używać ich wielokrotnie w całej aplikacji.
@@ -46,33 +69,43 @@ var (
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#666666"))
 
-	// Styl dla licznika czasu
+	// Styl dla licznika czasu w nagłówku logów
 	timerStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFA500")).
 			Bold(true)
+			
+	// Styl dla zapisanego czasu w liście skryptów
+	savedTimeStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#666666"))
 )
 
 // --- TYPY WIADOMOŚCI (MESSAGES) ---
 // Bubble Tea używa typów do komunikacji między procesami tła a główną pętlą UI.
 type logLineMsg string               // Przesyła nową linię tekstu do wyświetlenia w UI
-type finishedMsg struct{ err error } // Informuje o zakończeniu działania skryptu
 type tickMsg time.Time              // Wiadomość do aktualizacji licznika czasu
+
+// Informuje o zakończeniu działania skryptu, przechowując ewentualny błąd i nazwę skryptu
+type finishedMsg struct {
+	err  error
+	name string
+}
 
 // --- MODEL APLIKACJI ---
 // Główna struktura przechowująca stan całej aplikacji.
 type model struct {
-	choices   []string       // Lista znalezionych skryptów (.bat lub .sh)
-	cursor    int            // Indeks aktualnie podświetlonego pliku na liście
-	viewport  viewport.Model // Komponent Bubbles do obsługi przewijanego tekstu logów
-	logLines  []string       // Bufor przechowujący wszystkie odebrane linie logów
-	running   bool           // Czy skrypt jest aktualnie uruchomiony
-	focusLogs bool           // Czy sterowanie (strzałki) jest przekierowane na logi
-	ready     bool           // Czy otrzymaliśmy WindowSizeMsg i zainicjowaliśmy wymiary
-	extension string         // Wykryte rozszerzenie specyficzne dla systemu
-	width     int            // Zapamiętana szerokość okna terminala
-	height    int            // Zapamiętana wysokość okna terminala
-	startTime time.Time      // Czas rozpoczęcia skryptu
-	elapsed   time.Duration  // Aktualny czas trwania
+	choices     []string          // Lista znalezionych skryptów (.bat lub .sh)
+	cursor      int               // Indeks aktualnie podświetlonego pliku na liście
+	viewport    viewport.Model    // Komponent Bubbles do obsługi przewijanego tekstu logów
+	logLines    []string          // Bufor przechowujący wszystkie odebrane linie logów
+	running     bool              // Czy skrypt jest aktualnie uruchomiony
+	focusLogs   bool              // Czy sterowanie (strzałki) jest przekierowane na logi
+	ready       bool              // Czy otrzymaliśmy WindowSizeMsg i zainicjowaliśmy wymiary
+	extension   string            // Wykryte rozszerzenie specyficzne dla systemu
+	width       int               // Zapamiętana szerokość okna terminala
+	height      int               // Zapamiętana wysokość okna terminala
+	startTime   time.Time         // Czas rozpoczęcia skryptu
+	elapsed     time.Duration     // Aktualny czas trwania
+	scriptTimes map[string]string // Baza danych przechowująca ostatnie czasy działania (Nazwa -> Czas)
 }
 
 // Funkcja inicjalizująca model startowy i wykrywająca system.
@@ -91,8 +124,9 @@ func initialModel() model {
 	}
 
 	return model{
-		choices:   scripts,
-		extension: ext,
+		choices:     scripts,
+		extension:   ext,
+		scriptTimes: loadTimes(), // Wczytanie historii czasów na starcie
 	}
 }
 
@@ -101,7 +135,7 @@ func (m model) Init() tea.Cmd {
 	return nil
 }
 
-// tick co sekundę do odświeżania stopera
+// tick co sekundę do odświeżania stopera w czasie rzeczywistym
 func tick() tea.Cmd {
 	return tea.Every(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
@@ -121,7 +155,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport, cmd = m.viewport.Update(msg)
 		cmds = append(cmds, cmd)
 
-	// Aktualizacja licznika czasu
+	// Aktualizacja licznika czasu (jeśli skrypt nadal pracuje)
 	case tickMsg:
 		if m.running {
 			m.elapsed = time.Since(m.startTime)
@@ -193,6 +227,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logLines = []string{"[SYSTEM] Uruchamianie: " + m.choices[m.cursor] + "..."}
 				m.viewport.SetContent(strings.Join(m.logLines, "\n"))
 				target := m.choices[m.cursor]
+				
+				// Batch uruchamia skrypt i stoper JEDNOCZEŚNIE
 				return m, tea.Batch(m.runScript(target), tick())
 			}
 		}
@@ -208,12 +244,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.running = false
 		m.focusLogs = true // Aktywujemy tryb przeglądania logów (scroll) po zakończeniu.
 		m.elapsed = time.Since(m.startTime)
+		
+		// Zapisanie czasu do bazy (format np. 12s, 1m5s) i zrzut do pliku
+		timeFormatted := m.elapsed.Round(time.Second).String()
+		m.scriptTimes[msg.name] = timeFormatted
+		saveTimes(m.scriptTimes)
+		
 		status := "SUKCES"
 		if msg.err != nil {
 			status = fmt.Sprintf("BŁĄD (%v)", msg.err)
 		}
+		
 		m.logLines = append(m.logLines, fmt.Sprintf("\n[SYSTEM] Proces zakończony: %s", status))
-		m.logLines = append(m.logLines, fmt.Sprintf("[SYSTEM] Czas trwania: %s", m.elapsed.Round(time.Second)))
+		m.logLines = append(m.logLines, fmt.Sprintf("[SYSTEM] Czas trwania: %s (zapisano)", timeFormatted))
 		m.logLines = append(m.logLines, "[SYSTEM] Tryb przeglądania logów aktywny. Naciśnij 'q' aby wrócić do listy.")
 		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
 		m.viewport.GotoBottom()
@@ -248,7 +291,7 @@ func (m model) runScript(filename string) tea.Cmd {
 		scriptOutput := io.MultiReader(stdout, stderr)
 
 		if err := c.Start(); err != nil {
-			return finishedMsg{err: fmt.Errorf("nie udało się uruchomić: %w", err)}
+			return finishedMsg{err: fmt.Errorf("nie udało się uruchomić: %w", err), name: filename}
 		}
 
 		// TeeReader: jednocześnie zapisuje do pliku i pozwala czytać dane do interfejsu.
@@ -272,7 +315,7 @@ func (m model) runScript(filename string) tea.Cmd {
 
 		// Czekamy na fizyczne zakończenie procesu.
 		err = c.Wait()
-		return finishedMsg{err: err}
+		return finishedMsg{err: err, name: filename} // Zwracamy nazwę, by baza wiedziała, kto skończył
 	}
 }
 
@@ -311,7 +354,14 @@ func (m model) View() string {
 					line = lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaaaa")).Render(choice)
 				}
 			}
-			leftBuilder.WriteString(fmt.Sprintf("%s%s\n", cursor, line))
+			
+			// Jeśli mamy zapisany czas w JSON, doklejamy go obok nazwy skryptu
+			timeBadge := ""
+			if savedTime, exists := m.scriptTimes[choice]; exists {
+				timeBadge = savedTimeStyle.Render(fmt.Sprintf(" (%s)", savedTime))
+			}
+
+			leftBuilder.WriteString(fmt.Sprintf("%s%s%s\n", cursor, line, timeBadge))
 		}
 	}
 
@@ -325,7 +375,7 @@ func (m model) View() string {
 	vStyle := viewportStyle
 	logHeader := " LOGI TERMINALA (AUTO-ZAPIS DO .LOG) "
 	
-	// Przygotowanie informacji o czasie pracy
+	// Przygotowanie informacji o czasie pracy wyświetlanej w trakcie
 	timeStr := ""
 	if m.running || m.elapsed > 0 {
 		timeStr = timerStyle.Render(fmt.Sprintf(" [%s] ", m.elapsed.Round(time.Second)))
