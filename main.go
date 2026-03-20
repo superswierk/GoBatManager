@@ -56,7 +56,7 @@ var (
 			Foreground(lipgloss.Color("#7D56F4")).
 			Bold(true)
 
-	// Styl dla zaznaczonych elementów (multi-select)
+	// Styl dla zaznaczonych elementów z numerem kolejki
 	checkedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#00CBCB")).
 			Bold(true)
@@ -107,23 +107,23 @@ type finishedMsg struct {
 // --- MODEL APLIKACJI ---
 // Główna struktura przechowująca stan całej aplikacji.
 type model struct {
-	choices     []string          // Lista znalezionych skryptów (.bat lub .sh)
-	cursor      int               // Indeks aktualnie podświetlonego pliku na liście
-	selected    map[int]bool      // Mapa indeksów zaznaczonych skryptów (multi-select)
-	results     map[string]bool   // Wyniki wykonania: true = sukces, false = błąd
-	queue       []int             // Kolejka indeksów do wykonania
-	viewport    viewport.Model    // Komponent Bubbles do obsługi przewijanego tekstu logów
-	logLines    []string          // Bufor przechowujący wszystkie odebrane linie logów
-	running     bool              // Czy skrypt jest aktualnie uruchomiony
-	focusLogs   bool              // Czy sterowanie (strzałki) jest przekierowane na logi
-	ready       bool              // Czy otrzymaliśmy WindowSizeMsg i zainicjowaliśmy wymiary
-	extension   string            // Wykryte rozszerzenie specyficzne dla systemu
-	width       int               // Zapamiętana szerokość okna terminala
-	height      int               // Zapamiętana wysokość okna terminala
-	startTime   time.Time         // Czas rozpoczęcia skryptu
-	elapsed     time.Duration     // Aktualny czas trwania
-	scriptTimes map[string]string // Baza danych przechowująca ostatnie czasy działania (Nazwa -> Czas)
-	previewing  bool              // Czy włączony jest tryb podglądu skryptu
+	choices      []string          // Lista znalezionych skryptów (.bat lub .sh)
+	cursor       int               // Indeks aktualnie podświetlonego pliku na liście
+	selectedIdxs []int             // Kolejka indeksów zaznaczonych skryptów (zachowuje kolejność klikania)
+	results      map[string]bool   // Wyniki wykonania: true = sukces, false = błąd
+	activeQueue  []int             // Kopia kolejki używana podczas trwania procesu uruchamiania
+	viewport     viewport.Model    // Komponent Bubbles do obsługi przewijanego tekstu logów
+	logLines     []string          // Bufor przechowujący wszystkie odebrane linie logów
+	running      bool              // Czy skrypt jest aktualnie uruchomiony
+	focusLogs    bool              // Czy sterowanie (strzałki) jest przekierowane na logi
+	ready        bool              // Czy otrzymaliśmy WindowSizeMsg i zainicjowaliśmy wymiary
+	extension    string            // Wykryte rozszerzenie specyficzne dla systemu
+	width        int               // Zapamiętana szerokość okna terminala
+	height       int               // Zapamiętana wysokość okna terminala
+	startTime    time.Time         // Czas rozpoczęcia skryptu
+	elapsed      time.Duration     // Aktualny czas trwania
+	scriptTimes  map[string]string // Baza danych przechowująca ostatnie czasy działania (Nazwa -> Czas)
+	previewing   bool              // Czy włączony jest tryb podglądu skryptu
 }
 
 // Funkcja inicjalizująca model startowy i wykrywająca system.
@@ -142,11 +142,11 @@ func initialModel() model {
 	}
 
 	return model{
-		choices:     scripts,
-		extension:   ext,
-		selected:    make(map[int]bool),
-		results:     make(map[string]bool),
-		scriptTimes: loadTimes(), // Wczytanie historii czasów na starcie
+		choices:      scripts,
+		extension:    ext,
+		selectedIdxs: []int{},
+		results:      make(map[string]bool),
+		scriptTimes:  loadTimes(), // Wczytanie historii czasów na starcie
 	}
 }
 
@@ -248,9 +248,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "x":
-			// Zaznaczanie skryptu do kolejki (multi-select)
+			// Zaznaczanie skryptu do kolejki (obsługa kolejności)
 			if !m.running && len(m.choices) > 0 {
-				m.selected[m.cursor] = !m.selected[m.cursor]
+				found := -1
+				for i, idx := range m.selectedIdxs {
+					if idx == m.cursor {
+						found = i
+						break
+					}
+				}
+
+				if found != -1 {
+					// Usuwamy z kolejki jeśli już tam był
+					m.selectedIdxs = append(m.selectedIdxs[:found], m.selectedIdxs[found+1:]...)
+				} else {
+					// Dodajemy na koniec kolejki
+					m.selectedIdxs = append(m.selectedIdxs, m.cursor)
+				}
 			}
 
 		case "up", "k":
@@ -284,15 +298,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.focusLogs = false
 				m.previewing = false
 
-				// Budowanie kolejki: zaznaczone lub tylko ten pod kursorem
-				m.queue = []int{}
-				for i := range m.choices {
-					if m.selected[i] {
-						m.queue = append(m.queue, i)
-					}
-				}
-				if len(m.queue) == 0 {
-					m.queue = append(m.queue, m.cursor)
+				// Kopiujemy zaznaczone indeksy do aktywnej kolejki
+				if len(m.selectedIdxs) > 0 {
+					m.activeQueue = make([]int, len(m.selectedIdxs))
+					copy(m.activeQueue, m.selectedIdxs)
+				} else {
+					m.activeQueue = []int{m.cursor}
 				}
 
 				return m.runNextInQueue()
@@ -319,7 +330,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			status = fmt.Sprintf("BŁĄD (%v)", msg.err)
 			m.results[msg.name] = false // Błąd w GUI
-			// USUNIĘTO: m.queue = nil -> Kolejka będzie kontynuowana mimo błędu
 		} else {
 			m.results[msg.name] = true // Sukces w GUI
 		}
@@ -329,8 +339,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
 		m.viewport.GotoBottom()
 
-		// Jeśli są kolejne skrypty w kolejce, uruchom następny (nawet jeśli poprzedni padł)
-		if len(m.queue) > 0 {
+		// Kontynuujemy kolejkę mimo błędu
+		if len(m.activeQueue) > 0 {
 			m.running = true
 			return m.runNextInQueue()
 		}
@@ -338,6 +348,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.focusLogs = true // Po wszystkim aktywujemy tryb przeglądania logów
 		m.logLines = append(m.logLines, "[SYSTEM] Wszystkie zadania z kolejki zostały przetworzone. Naciśnij 'q' aby wrócić.")
 		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
+		
+		// Resetujemy zaznaczenie po poprawnym zakończeniu całego batcha
+		m.selectedIdxs = []int{}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -345,13 +358,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // runNextInQueue - pobiera następny skrypt z kolejki i go odpala
 func (m model) runNextInQueue() (model, tea.Cmd) {
-	if len(m.queue) == 0 {
+	if len(m.activeQueue) == 0 {
 		m.running = false
 		return m, nil
 	}
 
-	idx := m.queue[0]
-	m.queue = m.queue[1:]
+	idx := m.activeQueue[0]
+	m.activeQueue = m.activeQueue[1:]
 	m.cursor = idx // Ustaw kursor na aktualnie wykonywanym zadaniu
 
 	m.startTime = time.Now()
@@ -460,10 +473,19 @@ func (m model) View() string {
 		for i, choice := range m.choices {
 			cursor := "  "
 			
-			// Ikona zaznaczenia (multi-select)
+			// Sprawdzamy czy skrypt jest w kolejce i na jakim miejscu
+			qPos := -1
+			for pos, idx := range m.selectedIdxs {
+				if idx == i {
+					qPos = pos + 1
+					break
+				}
+			}
+
+			// Ikona zaznaczenia z numerem kolejki
 			checked := " [ ] "
-			if m.selected[i] {
-				checked = " [x] "
+			if qPos != -1 {
+				checked = fmt.Sprintf(" (%d) ", qPos)
 			}
 
 			// Ikona wyniku (sukces/błąd)
@@ -486,7 +508,7 @@ func (m model) View() string {
 				} else {
 					line = lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaaaa")).Render(choice)
 				}
-			} else if m.selected[i] {
+			} else if qPos != -1 {
 				line = checkedStyle.Render(choice)
 			}
 			
@@ -545,7 +567,7 @@ func (m model) View() string {
 	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, leftBox, rightBox)
 
 	// 4. STOPKA (Dynamiczna pomoc)
-	help := " q: wyjdź • x: zaznacz • enter: uruchom (kolejkę) • spacja: podgląd • ↑/↓: nawigacja"
+	help := " q: wyjdź • x: kolejka • enter: start • spacja: podgląd • ↑/↓: nawigacja"
 	if m.previewing {
 		help = " spacja/q: zamknij podgląd • ↑/↓: nawigacja • myszka: przewijanie podglądu"
 	} else if m.focusLogs {
