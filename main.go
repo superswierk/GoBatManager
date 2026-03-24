@@ -17,15 +17,14 @@ import (
 )
 
 // --- ZMIENNE GLOBALNE ---
-// Ta zmienna zostanie uzupełniona automatycznie przez GoReleaser podczas budowania taga.
-// W trybie deweloperskim (go run .) będzie wyświetlać "dev".
+// Wersja aplikacji (może być nadpisana przez flagi kompilacji)
 var version = "dev"
 
-// Plik naszej bazy danych w formacie JSON
+// Plik przechowujący czasy wykonania skryptów
 const timesFile = "script_times.json"
 
 // --- FUNKCJE POMOCNICZE BAZY DANYCH (JSON) ---
-// Ładuje zapisane czasy z pliku JSON do mapy. Jeśli plik nie istnieje, zwraca pustą mapę.
+// loadTimes wczytuje mapę z czasami z pliku JSON.
 func loadTimes() map[string]string {
 	times := make(map[string]string)
 	data, err := os.ReadFile(timesFile)
@@ -35,7 +34,7 @@ func loadTimes() map[string]string {
 	return times
 }
 
-// Zapisuje mapę czasów do pliku JSON w ładnie sformatowany sposób (Indent).
+// saveTimes zapisuje mapę czasów do pliku JSON w czytelnym formacie.
 func saveTimes(times map[string]string) {
 	data, err := json.MarshalIndent(times, "", "  ")
 	if err == nil {
@@ -44,7 +43,6 @@ func saveTimes(times map[string]string) {
 }
 
 // --- STYLE WIZUALNE (LIP GLOSS) ---
-// Definiujemy style raz, aby używać ich wielokrotnie w całej aplikacji.
 var (
 	headerStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -56,77 +54,70 @@ var (
 			Foreground(lipgloss.Color("#7D56F4")).
 			Bold(true)
 
-	// Styl dla zaznaczonych elementów z numerem kolejki
+	// Styl dla elementów w kolejce (z numerem)
 	checkedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#00CBCB")).
 			Bold(true)
 
-	// Styl sukcesu (zielony)
 	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
-	// Styl błędu (czerwony)
-	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
+	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
 
-	// Standardowa ramka dla okna logów
 	viewportStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#555555")).
 			Padding(0, 1)
 
-	// Ramka zmieniająca kolor na fioletowy, gdy użytkownik przewija logi (focus)
+	// Ramka zmieniająca kolor, gdy logi są aktywne (focus)
 	activeViewportStyle = viewportStyle.Copy().
 				BorderForeground(lipgloss.Color("#7D56F4"))
 
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#666666"))
 
-	// Styl dla licznika czasu w nagłówku logów
 	timerStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFA500")).
 			Bold(true)
 
-	// Styl dla zapisanego czasu w liście skryptów
 	savedTimeStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#666666"))
 
-	// Styl dla okna podglądu skryptu
 	previewViewportStyle = viewportStyle.Copy().
-			BorderForeground(lipgloss.Color("#00BFFF"))
+				BorderForeground(lipgloss.Color("#00BFFF"))
 )
 
-// --- TYPY WIADOMOŚCI (MESSAGES) ---
-// Bubble Tea używa typów do komunikacji między procesami tła a główną pętlą UI.
-type logLineMsg string               // Przesyła nową linię tekstu do wyświetlenia w UI
-type tickMsg time.Time              // Wiadomość do aktualizacji licznika czasu
+// --- TYPY WIADOMOŚCI ---
+type logLineMsg string // Nowa linia tekstu wysłana do UI
+type tickMsg time.Time  // Sygnał do odświeżenia stopera
 
-// Informuje o zakończeniu działania skryptu, przechowując ewentualny błąd i nazwę skryptu
+// Wiadomość o zakończeniu procesu
 type finishedMsg struct {
 	err  error
 	name string
 }
 
 // --- MODEL APLIKACJI ---
-// Główna struktura przechowująca stan całej aplikacji.
 type model struct {
-	choices      []string          // Lista znalezionych skryptów (.bat lub .sh)
-	cursor       int               // Indeks aktualnie podświetlonego pliku na liście
-	selectedIdxs []int             // Kolejka indeksów zaznaczonych skryptów (zachowuje kolejność klikania)
-	results      map[string]bool   // Wyniki wykonania: true = sukces, false = błąd
-	activeQueue  []int             // Kopia kolejki używana podczas trwania procesu uruchamiania
-	viewport     viewport.Model    // Komponent Bubbles do obsługi przewijanego tekstu logów
-	logLines     []string          // Bufor przechowujący wszystkie odebrane linie logów
-	running      bool              // Czy skrypt jest aktualnie uruchomiony
-	focusLogs    bool              // Czy sterowanie (strzałki) jest przekierowane na logi
-	ready        bool              // Czy otrzymaliśmy WindowSizeMsg i zainicjowaliśmy wymiary
-	extension    string            // Wykryte rozszerzenie specyficzne dla systemu
-	width        int               // Zapamiętana szerokość okna terminala
-	height       int               // Zapamiętana wysokość okna terminala
-	startTime    time.Time         // Czas rozpoczęcia skryptu
-	elapsed      time.Duration     // Aktualny czas trwania
-	scriptTimes  map[string]string // Baza danych przechowująca ostatnie czasy działania (Nazwa -> Czas)
-	previewing   bool              // Czy włączony jest tryb podglądu skryptu
+	choices      []string          // Lista dostępnych plików .bat / .sh
+	cursor       int               // Pozycja kursora w menu
+	selectedIdxs []int             // Lista indeksów wybranych do kolejki (zachowuje kolejność)
+	results      map[string]bool   // Wyniki wykonania (true = sukces, false = błąd/przerwanie)
+	activeQueue  []int             // Kopia kolejki na czas uruchomienia
+	viewport     viewport.Model    // Komponent do scrollowania logów
+	logLines     []string          // Bufor wszystkich linii tekstu
+	running      bool              // Czy skrypt aktualnie pracuje
+	currentCmd   *exec.Cmd         // Referencja do procesu (umożliwia przerwanie przez Ctrl+C)
+	focusLogs    bool              // Czy sterowanie klawiaturą jest w oknie logów
+	ready        bool              // Czy wymiary okna zostały zainicjowane
+	extension    string            // .bat dla Windows, .sh dla reszty
+	width        int               // Szerokość okna
+	height       int               // Wysokość okna
+	startTime    time.Time         // Czas startu aktualnego zadania
+	elapsed      time.Duration     // Aktualny czas trwania (stoper)
+	scriptTimes  map[string]string // Baza poprzednich czasów wykonania
+	previewing   bool              // Czy wyświetlany jest podgląd kodu pliku
 }
 
-// Funkcja inicjalizująca model startowy i wykrywająca system.
+// Inicjalizacja modelu startowego
 func initialModel() model {
 	ext := ".sh"
 	if runtime.GOOS == "windows" {
@@ -146,23 +137,22 @@ func initialModel() model {
 		extension:    ext,
 		selectedIdxs: []int{},
 		results:      make(map[string]bool),
-		scriptTimes:  loadTimes(), // Wczytanie historii czasów na starcie
+		scriptTimes:  loadTimes(),
 	}
 }
 
-// Init wywoływane na starcie aplikacji.
 func (m model) Init() tea.Cmd {
 	return nil
 }
 
-// tick co sekundę do odświeżania stopera w czasie rzeczywistym
+// tick co sekundę odświeża interfejs (stoper)
 func tick() tea.Cmd {
 	return tea.Every(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
 
-// Update - główna pętla obsługująca zdarzenia (klawisze, mysz, wiadomości systemowe).
+// Update - serce logiki aplikacji, reaguje na klawisze i zdarzenia systemowe
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		cmd  tea.Cmd
@@ -170,30 +160,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 
 	switch msg := msg.(type) {
-	// Obsługa myszy (scrollowanie logów)
+	// Obsługa kółka myszy w oknie logów
 	case tea.MouseMsg:
 		m.viewport, cmd = m.viewport.Update(msg)
 		cmds = append(cmds, cmd)
 
-	// Aktualizacja licznika czasu (jeśli skrypt nadal pracuje)
 	case tickMsg:
 		if m.running {
 			m.elapsed = time.Since(m.startTime)
 			return m, tick()
 		}
 
-	// WindowSizeMsg przychodzi na starcie i przy każdej zmianie rozmiaru okna.
+	// Dynamiczne skalowanie interfejsu przy zmianie rozmiaru okna terminala
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-
-		// Podział okna: Lewy panel (lista) zajmuje ok. 1/3 szerokości.
 		leftWidth := msg.Width / 3
 		if leftWidth < 28 {
-			leftWidth = 28 // Minimalna szerokość Sidebaru
+			leftWidth = 28
 		}
-
-		// Obliczanie wymiarów dla viewportu logów (prawa strona).
 		vpWidth := msg.Width - leftWidth - 4
 		vpHeight := msg.Height - 6
 
@@ -209,21 +194,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
-			return m, tea.Quit
+			// KLUCZOWA ZMIANA: Jeśli skrypt działa, przerywamy go zamiast zamykać apkę
+			if m.running && m.currentCmd != nil && m.currentCmd.Process != nil {
+				m.logLines = append(m.logLines, errorStyle.Render("\n[SYSTEM] PRZERWANO PRZEZ UŻYTKOWNIKA (Ctrl+C)..."))
 
-		case "q", "esc":
-			// Jeśli przeglądamy podgląd, zamykamy go
-			if m.previewing {
-				m.previewing = false
-				if len(m.logLines) == 0 {
-					m.viewport.SetContent("Wybierz skrypt i naciśnij ENTER...")
+				// Windows potrzebuje taskkill, by ubić też procesy potomne (np. to co wywołał .bat)
+				if runtime.GOOS == "windows" {
+					_ = exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprintf("%d", m.currentCmd.Process.Pid)).Run()
 				} else {
-					m.viewport.SetContent(strings.Join(m.logLines, "\n"))
-					m.viewport.GotoBottom()
+					_ = m.currentCmd.Process.Kill()
 				}
+				// Nie wywołujemy tea.Quit, by launcher został otwarty
 				return m, nil
 			}
-			// Jeśli przeglądamy logi, 'q' wraca do menu. W przeciwnym razie zamyka aplikację.
+			return m, tea.Quit // Jeśli nic nie działa, Ctrl+C wychodzi z programu
+
+		case "q", "esc":
+			if m.previewing {
+				m.previewing = false
+				m.refreshViewportContent()
+				return m, nil
+			}
 			if m.focusLogs {
 				m.focusLogs = false
 				return m, nil
@@ -231,24 +222,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case " ":
-			// Przełączanie trybu podglądu spacją
+			// Tryb podglądu pliku (Space)
 			if !m.running && len(m.choices) > 0 {
 				m.previewing = !m.previewing
 				if m.previewing {
 					m = m.updatePreview()
 				} else {
-					if len(m.logLines) == 0 {
-						m.viewport.SetContent("Wybierz skrypt i naciśnij ENTER...")
-					} else {
-						m.viewport.SetContent(strings.Join(m.logLines, "\n"))
-						m.viewport.GotoBottom()
-					}
+					m.refreshViewportContent()
 				}
 			}
 			return m, nil
 
 		case "x":
-			// Zaznaczanie skryptu do kolejki (obsługa kolejności)
+			// Dynamiczne zarządzanie kolejnością wykonywania (Kolejka)
 			if !m.running && len(m.choices) > 0 {
 				found := -1
 				for i, idx := range m.selectedIdxs {
@@ -257,9 +243,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						break
 					}
 				}
-
 				if found != -1 {
-					// Usuwamy z kolejki jeśli już tam był
+					// Usuwamy i przesuwamy resztę w górę
 					m.selectedIdxs = append(m.selectedIdxs[:found], m.selectedIdxs[found+1:]...)
 				} else {
 					// Dodajemy na koniec kolejki
@@ -292,71 +277,66 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "enter":
-			// Uruchomienie skryptu lub kolejki
+			// Start procesu lub całej kolejki
 			if !m.running && len(m.choices) > 0 {
 				m.running = true
 				m.focusLogs = false
 				m.previewing = false
-
-				// Kopiujemy zaznaczone indeksy do aktywnej kolejki
 				if len(m.selectedIdxs) > 0 {
 					m.activeQueue = make([]int, len(m.selectedIdxs))
 					copy(m.activeQueue, m.selectedIdxs)
 				} else {
 					m.activeQueue = []int{m.cursor}
 				}
-
 				return m.runNextInQueue()
 			}
 		}
 
-	// Nowa linia tekstu przyszła z procesu skryptu (goroutine).
 	case logLineMsg:
+		// Dodawanie linii logu ze skryptu do viewportu
 		m.logLines = append(m.logLines, string(msg))
 		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
-		m.viewport.GotoBottom() // Automatyczny scroll przy nowych logach
+		m.viewport.GotoBottom()
 
-	// Powiadomienie o zakończeniu pracy procesu skryptu.
 	case finishedMsg:
+		// Zakończenie pojedynczego zadania
 		m.running = false
+		m.currentCmd = nil
 		m.elapsed = time.Since(m.startTime)
-		
-		// Zapisanie czasu do bazy (format np. 12s, 1m5s) i zrzut do pliku
+
 		timeFormatted := m.elapsed.Round(time.Second).String()
 		m.scriptTimes[msg.name] = timeFormatted
 		saveTimes(m.scriptTimes)
-		
+
 		status := "SUKCES"
 		if msg.err != nil {
-			status = fmt.Sprintf("BŁĄD (%v)", msg.err)
-			m.results[msg.name] = false // Błąd w GUI
+			status = fmt.Sprintf("ZAKOŃCZONO (%v)", msg.err)
+			m.results[msg.name] = false
 		} else {
-			m.results[msg.name] = true // Sukces w GUI
+			m.results[msg.name] = true
 		}
-		
+
 		m.logLines = append(m.logLines, fmt.Sprintf("\n[SYSTEM] Proces zakończony: %s", status))
 		m.logLines = append(m.logLines, fmt.Sprintf("[SYSTEM] Czas trwania: %s", timeFormatted))
 		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
 		m.viewport.GotoBottom()
 
-		// Kontynuujemy kolejkę mimo błędu
+		// Idziemy dalej w kolejce
 		if len(m.activeQueue) > 0 {
 			m.running = true
 			return m.runNextInQueue()
 		}
 
-		m.focusLogs = true // Po wszystkim aktywujemy tryb przeglądania logów
-		m.logLines = append(m.logLines, "[SYSTEM] Wszystkie zadania z kolejki zostały przetworzone. Naciśnij 'q' aby wrócić.")
+		m.focusLogs = true
+		m.logLines = append(m.logLines, "[SYSTEM] Zadania zakończone. Naciśnij 'q' aby wrócić.")
 		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
-		
-		// Resetujemy zaznaczenie po poprawnym zakończeniu całego batcha
-		m.selectedIdxs = []int{}
+		m.selectedIdxs = []int{} // Czyścimy kolejkę po skończeniu
 	}
 
 	return m, tea.Batch(cmds...)
 }
 
-// runNextInQueue - pobiera następny skrypt z kolejki i go odpala
+// runNextInQueue obsługuje logikę przechodzenia do kolejnego elementu listy zadań
 func (m model) runNextInQueue() (model, tea.Cmd) {
 	if len(m.activeQueue) == 0 {
 		m.running = false
@@ -365,19 +345,30 @@ func (m model) runNextInQueue() (model, tea.Cmd) {
 
 	idx := m.activeQueue[0]
 	m.activeQueue = m.activeQueue[1:]
-	m.cursor = idx // Ustaw kursor na aktualnie wykonywanym zadaniu
+	m.cursor = idx
 
 	m.startTime = time.Now()
 	m.elapsed = 0
-	msg := fmt.Sprintf("[SYSTEM] >>> KOLEJKA: Uruchamianie %s...", m.choices[idx])
+	msg := fmt.Sprintf("[SYSTEM] >>> Uruchamianie %s...", m.choices[idx])
 	m.logLines = append(m.logLines, "\n"+msg)
 	m.viewport.SetContent(strings.Join(m.logLines, "\n"))
-	
+
 	target := m.choices[idx]
-	return m, tea.Batch(m.runScript(target), tick())
+
+	var c *exec.Cmd
+	if runtime.GOOS == "windows" {
+		c = exec.Command("cmd", "/c", target)
+	} else {
+		c = exec.Command("sh", target)
+	}
+
+	m.currentCmd = c // Zapisujemy, by Ctrl+C mógł do niego "dosięgnąć"
+
+	// POPRAWKA: Zwracamy model wraz z funkcją runScript jako Cmd
+	return m, m.runScript(c, target)
 }
 
-// Funkcja ładująca zawartość pliku do podglądu
+// updatePreview wczytuje treść pliku do okna podglądu
 func (m model) updatePreview() model {
 	if len(m.choices) == 0 {
 		return m
@@ -385,7 +376,7 @@ func (m model) updatePreview() model {
 	filename := m.choices[m.cursor]
 	content, err := os.ReadFile(filename)
 	if err != nil {
-		m.viewport.SetContent(fmt.Sprintf("Nie można odczytać pliku: %v", err))
+		m.viewport.SetContent(fmt.Sprintf("Błąd odczytu pliku: %v", err))
 		return m
 	}
 	m.viewport.SetContent(string(content))
@@ -393,87 +384,77 @@ func (m model) updatePreview() model {
 	return m
 }
 
-// runScript - asynchroniczne uruchomienie procesu, zapis do pliku i streaming do UI.
-func (m model) runScript(filename string) tea.Cmd {
+// refreshViewportContent przywraca logi terminala po zamknięciu podglądu
+func (m *model) refreshViewportContent() {
+	if len(m.logLines) == 0 {
+		m.viewport.SetContent("Wybierz skrypt i naciśnij ENTER...")
+	} else {
+		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
+		m.viewport.GotoBottom()
+	}
+}
+
+// runScript - asynchroniczny streaming wyjścia konsoli do UI i do pliku .log
+func (m model) runScript(c *exec.Cmd, filename string) tea.Cmd {
 	return func() tea.Msg {
 		logFilename := strings.TrimSuffix(filename, m.extension) + ".log"
-
-		// Tworzymy lub nadpisujemy plik .log dla danego skryptu.
 		logFile, err := os.Create(logFilename)
 		if err != nil {
-			return finishedMsg{err: fmt.Errorf("błąd zapisu pliku .log: %w", err), name: filename}
+			return finishedMsg{err: fmt.Errorf("błąd logu: %w", err), name: filename}
 		}
 		defer logFile.Close()
 
-		// Dobór komendy w zależności od wykrytego systemu.
-		var c *exec.Cmd
-		if runtime.GOOS == "windows" {
-			c = exec.Command("cmd", "/c", filename)
-		} else {
-			c = exec.Command("sh", filename)
-		}
-
-		// Przechwytywanie standardowego wyjścia i błędów.
 		stdout, _ := c.StdoutPipe()
 		stderr, _ := c.StderrPipe()
 		scriptOutput := io.MultiReader(stdout, stderr)
 
 		if err := c.Start(); err != nil {
-			return finishedMsg{err: fmt.Errorf("nie udało się uruchomić: %w", err), name: filename}
+			return finishedMsg{err: fmt.Errorf("błąd startu: %w", err), name: filename}
 		}
 
-		// TeeReader: jednocześnie zapisuje do pliku i pozwala czytać dane do interfejsu.
+		// TeeReader: rozdziela strumień na plik i na interfejs użytkownika
 		teeReader := io.TeeReader(scriptOutput, logFile)
-		
-		// bufio.Reader radzi sobie z liniami dowolnej długości (rozwiązuje błąd 'token too long').
 		reader := bufio.NewReader(teeReader)
 		for {
 			line, err := reader.ReadString('\n')
 			if line != "" {
-				// Wysyłamy linię do głównej pętli Bubble Tea (p.Send).
 				p.Send(logLineMsg(strings.TrimRight(line, "\r\n")))
 			}
 			if err != nil {
-				if err != io.EOF {
-					p.Send(logLineMsg(fmt.Sprintf("[SYSTEM BŁĄD] Problem z odczytem: %v", err)))
-				}
 				break
 			}
 		}
 
-		// Czekamy na fizyczne zakończenie procesu.
 		err = c.Wait()
-		return finishedMsg{err: err, name: filename} // Zwracamy nazwę, by baza wiedziała, kto skończył
+		return finishedMsg{err: err, name: filename}
 	}
 }
 
-// View - buduje końcowy obraz interfejsu (renderuje klocki Sidebaru i Logów).
+// View - budowanie interfejsu graficznego (renderowanie klatek)
 func (m model) View() string {
 	if !m.ready {
-		return "\n  Inicjalizacja interfejsu..."
+		return "\n  Inicjalizacja systemu..."
 	}
 
-	// 1. NAGŁÓWEK GŁÓWNY (z dynamiczną wersją)
-	header := headerStyle.Render(fmt.Sprintf(" SCRIPT LAUNCHER (%s) v%s ", strings.ToUpper(runtime.GOOS), version))
+	// 1. Nagłówek
+	headerText := fmt.Sprintf(" SCRIPT LAUNCHER (%s) v%s ", strings.ToUpper(runtime.GOOS), version)
+	header := headerStyle.Render(headerText)
 
-	// Obliczanie szerokości lewego panelu.
 	leftWidth := m.width / 3
 	if leftWidth < 28 {
 		leftWidth = 28
 	}
 
-	// 2. LEWY PANEL (Lista skryptów)
+	// 2. Budowanie listy plików (Lewy Panel)
 	var leftBuilder strings.Builder
-	leftTitle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4")).Render("DOSTĘPNE SKRYPTY:")
+	leftTitle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4")).Render("LISTA SKRYPTÓW:")
 	leftBuilder.WriteString(leftTitle + "\n\n")
 
 	if len(m.choices) == 0 {
-		leftBuilder.WriteString(fmt.Sprintf("Brak plików %s w tym folderze.\n", m.extension))
+		leftBuilder.WriteString("Brak pasujących plików w folderze.\n")
 	} else {
 		for i, choice := range m.choices {
 			cursor := "  "
-			
-			// Sprawdzamy czy skrypt jest w kolejce i na jakim miejscu
 			qPos := -1
 			for pos, idx := range m.selectedIdxs {
 				if idx == i {
@@ -482,13 +463,13 @@ func (m model) View() string {
 				}
 			}
 
-			// Ikona zaznaczenia z numerem kolejki
+			// Ikona (N) dla kolejki lub puste nawiasy
 			checked := " [ ] "
 			if qPos != -1 {
 				checked = fmt.Sprintf(" (%d) ", qPos)
 			}
 
-			// Ikona wyniku (sukces/błąd)
+			// Ikona rezultatu (✔ / ✘)
 			resultIcon := ""
 			if res, ok := m.results[choice]; ok {
 				if res {
@@ -499,8 +480,6 @@ func (m model) View() string {
 			}
 
 			line := choice
-			
-			// Kolorowanie wiersza
 			if m.cursor == i {
 				cursor = "> "
 				if !m.focusLogs {
@@ -511,8 +490,8 @@ func (m model) View() string {
 			} else if qPos != -1 {
 				line = checkedStyle.Render(choice)
 			}
-			
-			// Jeśli mamy zapisany czas w JSON, doklejamy go obok nazwy skryptu
+
+			// Czas ostatniego wykonania z bazy JSON
 			timeBadge := ""
 			if savedTime, exists := m.scriptTimes[choice]; exists {
 				timeBadge = savedTimeStyle.Render(fmt.Sprintf(" (%s)", savedTime))
@@ -522,17 +501,11 @@ func (m model) View() string {
 		}
 	}
 
-	leftBox := lipgloss.NewStyle().
-		Width(leftWidth).
-		Height(m.height - 3).
-		PaddingRight(2).
-		Render(leftBuilder.String())
+	leftBox := lipgloss.NewStyle().Width(leftWidth).Height(m.height - 3).PaddingRight(2).Render(leftBuilder.String())
 
-	// 3. PRAWY PANEL (Logi)
+	// 3. Budowanie Logów (Prawy Panel)
 	vStyle := viewportStyle
-	logHeader := " LOGI TERMINALA (AUTO-ZAPIS DO .LOG) "
-	
-	// Przygotowanie informacji o czasie pracy wyświetlanej w trakcie
+	logHeader := " LOGI TERMINALA (AUTO-ZAPIS DO PLIKU) "
 	timeStr := ""
 	if m.running || m.elapsed > 0 {
 		timeStr = timerStyle.Render(fmt.Sprintf(" [%s] ", m.elapsed.Round(time.Second)))
@@ -540,61 +513,44 @@ func (m model) View() string {
 
 	if m.previewing {
 		vStyle = previewViewportStyle
-		logHeader = fmt.Sprintf(" PODGLĄD: %s (SPACJA = ZAMKNIJ) ", m.choices[m.cursor])
-		timeStr = "" 
+		logHeader = fmt.Sprintf(" PODGLĄD PLIKU: %s ", m.choices[m.cursor])
+		timeStr = ""
 	} else if m.focusLogs {
 		vStyle = activeViewportStyle
-		logHeader = " TRYB PRZEGLĄDANIA LOGÓW (Q = POWRÓT) "
+		logHeader = " PRZEGLĄDANIE HISTORII LOGÓW (Q = POWRÓT) "
 	}
 
-	// Tytuł dla prawego panelu z dołączonym licznikiem czasu.
-	rightTitle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#333333")).
-		Foreground(lipgloss.Color("#FFFFFF")).
-		Padding(0, 1).
-		Render(logHeader)
-	
-	// Składamy nagłówek panelu logów (Tytuł + Czas)
+	rightTitle := lipgloss.NewStyle().Background(lipgloss.Color("#333333")).Foreground(lipgloss.Color("#FFFFFF")).Padding(0, 1).Render(logHeader)
 	logBar := lipgloss.JoinHorizontal(lipgloss.Center, rightTitle, timeStr)
 
-	// Składamy prawy panel: Tytuł nad ramką z tekstem (viewport).
-	rightBox := lipgloss.JoinVertical(lipgloss.Left,
-		logBar,
-		vStyle.Render(m.viewport.View()),
-	)
+	rightBox := lipgloss.JoinVertical(lipgloss.Left, logBar, vStyle.Render(m.viewport.View()))
 
-	// Łączymy lewy sidebar z prawymi logami w poziomie.
+	// Połączenie paneli w jedną linię
 	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, leftBox, rightBox)
 
-	// 4. STOPKA (Dynamiczna pomoc)
-	help := " q: wyjdź • x: kolejka • enter: start • spacja: podgląd • ↑/↓: nawigacja"
-	if m.previewing {
-		help = " spacja/q: zamknij podgląd • ↑/↓: nawigacja • myszka: przewijanie podglądu"
+	// 4. Dynamiczny pasek pomocy na dole
+	help := " q: wyjdź • x: kolejka • enter: start • ctrl+c: przerwij skrypt • ↑/↓: nawigacja"
+	if m.running {
+		help = " ctrl+c: PRZERWIJ DZIAŁANIE • ↑/↓: przewijanie logów"
+	} else if m.previewing {
+		help = " spacja/q/esc: zamknij podgląd • myszka: przewijanie"
 	} else if m.focusLogs {
-		help = " q: powrót do listy • ↑/↓: przewijanie logów kółkiem myszy"
+		help = " q: powrót do listy plików • ↑/↓: przewijanie logów kółkiem"
 	}
 	footer := helpStyle.Render(help)
 
-	// 5. CAŁOŚĆ: Składamy wszystko w pionie (Nagłówek -> Miejsce -> Treść -> Stopka).
-	return lipgloss.JoinVertical(lipgloss.Left,
-		header,
-		"", // Pusta linia odstępu
-		mainContent,
-		footer,
-	)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", mainContent, footer)
 }
 
-// Globalna zmienna p pozwala asynchronicznym funkcjom (goroutines) wysyłać dane do UI.
+// Główny punkt wejścia do aplikacji
 var p *tea.Program
 
 func main() {
 	m := initialModel()
-	// AltScreen zapobiega zaśmiecaniu historii terminala.
-	// MouseCellMotion umożliwia scrollowanie kółkiem myszy.
+	// AltScreen tworzy osobny bufor terminala (nie niszczy widoku konsoli po wyjściu)
 	p = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-
 	if _, err := p.Run(); err != nil {
-		fmt.Printf("Wystąpił błąd krytyczny: %v", err)
+		fmt.Printf("Wystąpił błąd krytyczny: %v\n", err)
 		os.Exit(1)
 	}
 }
